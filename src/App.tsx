@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { db } from "./firebase";
-import { collection, addDoc, getDocs } from "firebase/firestore";
+import { addDoc, collection, onSnapshot, orderBy, query } from "firebase/firestore";
 
 type BulbType = "LED" | "FLUORESCENT" | "UNKNOWN";
 
@@ -22,6 +22,7 @@ const DURATION_MINUTES = 10;
 const COST_PER_KWH = 200;
 const CO2_PER_KWH = 0.424;
 const ADMIN_PASSWORD = "earth2026";
+const SCHOOL_TOTAL_STUDENTS = 1000;
 
 const CLASS_OPTIONS = [
   "1-1", "1-2", "1-3", "1-4", "1-5", "1-6", "1-7", "1-8", "1-9", "1-10", "1-11", "1-12",
@@ -54,7 +55,7 @@ function formatDateTime(value: string) {
 }
 
 function formatKwh(value: number) {
-  return value.toFixed(4);
+  return value.toFixed(3);
 }
 
 function formatWon(value: number) {
@@ -62,17 +63,62 @@ function formatWon(value: number) {
 }
 
 function formatCo2(value: number) {
-  return value.toFixed(4);
+  return value.toFixed(3);
 }
 
 function normalizeName(value: string) {
   return value.trim().replace(/\s+/g, "");
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getGaugeColor(percent: number) {
+  if (percent < 35) return "#3bb273";
+  if (percent < 70) return "#f0c419";
+  return "#f25f5c";
+}
+
+function makeIcons(emoji: string, count: number) {
+  return Array.from({ length: count }, (_, i) => (
+    <span key={`${emoji}-${i}`} style={{ fontSize: "20px" }}>
+      {emoji}
+    </span>
+  ));
+}
+
+function useCountUp(target: number, decimals = 0, duration = 700) {
+  const [display, setDisplay] = useState(target);
+  const previousRef = useRef(target);
+
+  useEffect(() => {
+    const startValue = previousRef.current;
+    const endValue = target;
+    const startTime = performance.now();
+
+    const animate = (time: number) => {
+      const progress = clamp((time - startTime) / duration, 0, 1);
+      const value = startValue + (endValue - startValue) * progress;
+      setDisplay(Number(value.toFixed(decimals)));
+
+      if (progress < 1) {
+        requestAnimationFrame(animate);
+      } else {
+        previousRef.current = endValue;
+      }
+    };
+
+    requestAnimationFrame(animate);
+  }, [target, decimals, duration]);
+
+  return display;
+}
+
 const styles = {
   page: {
     minHeight: "100vh",
-    background: "linear-gradient(180deg, #0b1f1a 0%, #123b2d 50%, #1f6b49 100%)",
+    background: "linear-gradient(180deg, #0b1f1a 0%, #123b2d 48%, #1f6b49 100%)",
     color: "#f4fff8",
     fontFamily: "sans-serif",
     padding: "12px",
@@ -150,28 +196,33 @@ function App() {
   const [showAdminModal, setShowAdminModal] = useState(false);
   const [adminPasswordInput, setAdminPasswordInput] = useState("");
   const [adminPasswordError, setAdminPasswordError] = useState("");
+  const [titleTapCount, setTitleTapCount] = useState(0);
+
+  const [now, setNow] = useState(new Date());
 
   const preview = useMemo(() => calculateResult(bulbCount, bulbType), [bulbCount, bulbType]);
   const latestSubmission = submissions[submissions.length - 1] ?? null;
 
-  const loadSubmissions = async () => {
-    const snapshot = await getDocs(collection(db, "submissions"));
-    const items = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    })) as Submission[];
+  useEffect(() => {
+    const q = query(collection(db, "submissions"), orderBy("submittedAt", "asc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const items = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      })) as Submission[];
 
-    const sorted = items.sort(
-      (a, b) => new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime()
-    );
+      setSubmissions(items);
+    });
 
-    setSubmissions(sorted);
-  };
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
-    loadSubmissions().catch((err) => {
-      console.error("제출 데이터 불러오기 실패:", err);
-    });
+    const timer = setInterval(() => {
+      setNow(new Date());
+    }, 1000);
+
+    return () => clearInterval(timer);
   }, []);
 
   const hasDuplicateSubmission = (studentName: string, selectedClass: string) => {
@@ -244,7 +295,6 @@ function App() {
       };
 
       await addDoc(collection(db, "submissions"), submission);
-      await loadSubmissions();
 
       setSuccessMessage("인증이 완료되었어요.");
       setName("");
@@ -267,45 +317,25 @@ function App() {
   const totalWon = submissions.reduce((sum, s) => sum + s.savedCostWon, 0);
   const totalCo2 = submissions.reduce((sum, s) => sum + s.savedCo2Kg, 0);
 
-  const classSummary = useMemo(() => {
-    const summaryMap = new Map<
-      string,
-      { className: string; people: number; bulbs: number; kwh: number; won: number; co2: number }
-    >();
+  const animatedPeople = useCountUp(totalPeople, 0, 700);
+  const animatedKwh = useCountUp(totalKwh, 2, 700);
+  const animatedCo2 = useCountUp(totalCo2, 2, 700);
 
-    for (const item of submissions) {
-      const current = summaryMap.get(item.className) ?? {
-        className: item.className,
-        people: 0,
-        bulbs: 0,
-        kwh: 0,
-        won: 0,
-        co2: 0,
-      };
+  const participantPercent = clamp((totalPeople / SCHOOL_TOTAL_STUDENTS) * 100, 0, 100);
+  const powerPercent = clamp((totalKwh / 10) * 100, 0, 100);
+  const carbonPercent = clamp((totalCo2 / 5) * 100, 0, 100);
 
-      current.people += 1;
-      current.bulbs += item.bulbCount;
-      current.kwh += item.savedKwh;
-      current.won += item.savedCostWon;
-      current.co2 += item.savedCo2Kg;
+  const participantColor = getGaugeColor(participantPercent);
+  const powerColor = getGaugeColor(powerPercent);
+  const carbonColor = getGaugeColor(carbonPercent);
 
-      summaryMap.set(item.className, current);
-    }
-
-    return Array.from(summaryMap.values()).sort((a, b) => {
-      if (b.kwh !== a.kwh) return b.kwh - a.kwh;
-      if (b.people !== a.people) return b.people - a.people;
-      return a.className.localeCompare(b.className, "ko");
-    });
-  }, [submissions]);
-
-  const recentSubmissions = useMemo(() => {
-    return [...submissions]
-      .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime())
-      .slice(0, 20);
-  }, [submissions]);
+  const powerIcons = clamp(Math.round(totalKwh * 2), 1, 8);
+  const carbonIcons = clamp(Math.round(totalCo2 * 3), 1, 8);
 
   const currentBulbInfo = bulbConfig[bulbType];
+
+  const isEventLive =
+    now.getHours() === 20 && now.getMinutes() >= 0 && now.getMinutes() < 10;
 
   const openAdminPage = () => {
     if (isAdminUnlocked) {
@@ -335,16 +365,28 @@ function App() {
     setAdminPasswordError("");
   };
 
-  const navButtonStyle = (active: boolean) => ({
-    flex: 1,
-    padding: "12px 14px",
-    borderRadius: "14px",
-    border: "none",
-    fontWeight: 800,
-    fontSize: "15px",
-    cursor: "pointer",
-    background: active ? "#ffffff" : "rgba(255,255,255,0.18)",
-    color: active ? "#0f5132" : "#ffffff",
+  const handleTitleTap = () => {
+    const next = titleTapCount + 1;
+    if (next >= 5) {
+      setTitleTapCount(0);
+      openAdminPage();
+      return;
+    }
+    setTitleTapCount(next);
+  };
+
+  const recentSubmissions = useMemo(() => {
+    return [...submissions]
+      .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime())
+      .slice(0, 20);
+  }, [submissions]);
+
+  const gaugeBar = (percent: number, color: string) => ({
+    width: `${percent}%`,
+    height: "100%",
+    borderRadius: "999px",
+    background: `linear-gradient(90deg, ${color} 0%, ${color}cc 100%)`,
+    transition: "width 0.5s ease",
   });
 
   return (
@@ -352,29 +394,102 @@ function App() {
       <div style={styles.container}>
         <div style={styles.hero}>
           <div style={{ fontSize: "13px", opacity: 0.95, marginBottom: "6px" }}>🌍 Earth Day Campaign</div>
-          <h1 style={{ margin: 0, fontSize: "28px", lineHeight: 1.25, fontWeight: 900 }}>
+
+          <h1
+            onClick={handleTitleTap}
+            style={{
+              margin: 0,
+              fontSize: "28px",
+              lineHeight: 1.25,
+              fontWeight: 900,
+              cursor: "pointer",
+              userSelect: "none",
+            }}
+          >
             남창고 지구의 날 실천
           </h1>
+
           <p style={{ marginTop: "10px", marginBottom: 0, color: "#eafff1", lineHeight: 1.6, fontSize: "15px" }}>
             10분 동안 불을 끄고, 우리 학교의 실천을 함께 기록해요.
           </p>
 
-          <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
-            <button onClick={() => setPage("student")} style={navButtonStyle(page === "student")}>
-              학생 화면
-            </button>
-            <button onClick={openAdminPage} style={navButtonStyle(page === "admin")}>
-              관리자 화면
-            </button>
-          </div>
+          {isEventLive && (
+            <div
+              style={{
+                marginTop: "14px",
+                background: "rgba(255,255,255,0.16)",
+                border: "1px solid rgba(255,255,255,0.22)",
+                borderRadius: "16px",
+                padding: "10px 12px",
+                fontWeight: 800,
+                fontSize: "15px",
+              }}
+            >
+              🔴 지금 진행 중입니다 (20:00~20:10)
+            </div>
+          )}
         </div>
 
         {page === "student" ? (
           <>
             <div style={styles.card}>
+              <div style={{ color: "#baf3cf", fontSize: "14px", fontWeight: 700 }}>실시간 참여 현황</div>
+              <div style={{ marginTop: "8px", fontSize: "44px", fontWeight: 900, lineHeight: 1, color: "#ffffff" }}>
+                {animatedPeople}
+              </div>
+              <div style={{ marginTop: "6px", fontSize: "16px", fontWeight: 700 }}>명 참여 중</div>
+
+              <div style={{ marginTop: "12px", height: "12px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
+                <div style={gaugeBar(participantPercent, participantColor)} />
+              </div>
+
+              <div style={{ marginTop: "8px", color: "#d7f7e2", fontSize: "13px" }}>
+                전체 예상 참여 인원 {SCHOOL_TOTAL_STUDENTS}명 기준 {participantPercent.toFixed(1)}%
+              </div>
+            </div>
+
+            <div style={styles.card}>
+              <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "22px" }}>실시간 절감 효과</h2>
+
+              <div style={{ display: "grid", gap: "12px" }}>
+                <div style={styles.statCard}>
+                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>⚡ 누적 절감 전력</div>
+                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{animatedKwh.toFixed(2)} kWh</div>
+                  <div style={{ marginTop: "8px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                    {makeIcons("💡", powerIcons)}
+                  </div>
+                  <div style={{ marginTop: "10px", height: "10px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
+                    <div style={gaugeBar(powerPercent, powerColor)} />
+                  </div>
+                </div>
+
+                <div style={styles.statCard}>
+                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>🌿 누적 탄소 감소</div>
+                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{animatedCo2.toFixed(2)} kg CO₂</div>
+                  <div style={{ marginTop: "8px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                    {makeIcons("🌳", carbonIcons)}
+                  </div>
+                  <div style={{ marginTop: "10px", height: "10px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
+                    <div style={gaugeBar(carbonPercent, carbonColor)} />
+                  </div>
+                </div>
+
+                <div style={styles.statCard}>
+                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>💰 누적 절약 전기요금</div>
+                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{formatWon(totalWon)}원</div>
+                </div>
+
+                <div style={styles.statCard}>
+                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>💡 누적 전등 수</div>
+                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{totalBulbs}개</div>
+                </div>
+              </div>
+            </div>
+
+            <div style={styles.card}>
               <h2 style={{ marginTop: 0, marginBottom: "8px", fontSize: "22px" }}>불 끄기 인증</h2>
               <p style={{ marginTop: 0, color: "#d7f7e2", lineHeight: 1.6, fontSize: "15px" }}>
-                집에서 10분 동안 불을 끈 뒤 아래 내용을 입력해 주세요.
+                지금 계신 곳에서 10분 동안 불을 끈 뒤 아래 내용을 입력해 주세요.
               </p>
 
               <form onSubmit={handleSubmit}>
@@ -629,35 +744,6 @@ function App() {
                 </>
               )}
             </div>
-
-            <div style={styles.card}>
-              <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "22px" }}>실시간 학교 통계</h2>
-              <div style={{ display: "grid", gap: "10px" }}>
-                <div style={styles.statCard}>
-                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>👥 참여 인원</div>
-                  <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>{totalPeople}</div>
-                  <div style={{ color: "#dbffea" }}>명</div>
-                </div>
-
-                <div style={styles.statCard}>
-                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>💡 끈 전등 수</div>
-                  <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>{totalBulbs}</div>
-                  <div style={{ color: "#dbffea" }}>개</div>
-                </div>
-
-                <div style={styles.statCard}>
-                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>⚡ 총 절감 전력</div>
-                  <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>{formatKwh(totalKwh)}</div>
-                  <div style={{ color: "#dbffea" }}>kWh</div>
-                </div>
-
-                <div style={styles.statCard}>
-                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>🌿 총 탄소 저감</div>
-                  <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>{formatCo2(totalCo2)}</div>
-                  <div style={{ color: "#dbffea" }}>kg CO₂</div>
-                </div>
-              </div>
-            </div>
           </>
         ) : (
           <>
@@ -666,7 +752,7 @@ function App() {
                 <div>
                   <h2 style={{ marginTop: 0, marginBottom: "8px", fontSize: "22px" }}>관리자 요약 화면</h2>
                   <p style={{ margin: 0, color: "#d7f7e2", fontSize: "14px", lineHeight: 1.5 }}>
-                    제출 데이터는 Firebase에 저장되며 새로고침 후에도 유지됩니다.
+                    제출 데이터는 실시간으로 반영됩니다.
                   </p>
                 </div>
                 <button
@@ -707,28 +793,6 @@ function App() {
                   <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{formatCo2(totalCo2)} kg</div>
                 </div>
               </div>
-            </div>
-
-            <div style={styles.card}>
-              <h3 style={{ marginTop: 0, marginBottom: "12px" }}>학급별 순위</h3>
-              {classSummary.length === 0 ? (
-                <p style={{ color: "#d7f7e2", margin: 0 }}>아직 제출된 데이터가 없습니다.</p>
-              ) : (
-                <div style={{ display: "grid", gap: "10px" }}>
-                  {classSummary.map((item, index) => (
-                    <div key={item.className} style={styles.statCard}>
-                      <div style={{ color: "#baf3cf", fontSize: "13px" }}>{index + 1}위</div>
-                      <div style={{ marginTop: "4px", fontSize: "22px", fontWeight: 900 }}>{item.className}</div>
-                      <div style={{ marginTop: "8px", color: "#dbffea", lineHeight: 1.7, fontSize: "14px" }}>
-                        <div>👥 참여 인원: {item.people}명</div>
-                        <div>💡 전등 수: {item.bulbs}개</div>
-                        <div>⚡ 절감 전력: {formatKwh(item.kwh)} kWh</div>
-                        <div>💰 절약 요금: {formatWon(item.won)}원</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
 
             <div style={styles.card}>
