@@ -498,7 +498,6 @@ export default function App() {
              <div>전교생 {SCHOOL_TOTAL_STUDENTS}명 중 참여</div>
 </div>
               </div>
-            </div>
 
             <div style={styles.card}>
               <h2
