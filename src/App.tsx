@@ -21,8 +21,13 @@ type Submission = {
 const DURATION_MINUTES = 10;
 const COST_PER_KWH = 200;
 const CO2_PER_KWH = 0.424;
+
 const ADMIN_PASSWORD = "earth2026";
+
 const SCHOOL_TOTAL_STUDENTS = 1000;
+const EVENT_TARGET_STUDENTS = 300;
+const POWER_TARGET_KWH = 2.5;
+const CO2_TARGET_KG = 1.0;
 
 const CLASS_OPTIONS = [
   "1-1", "1-2", "1-3", "1-4", "1-5", "1-6", "1-7", "1-8", "1-9", "1-10", "1-11", "1-12",
@@ -75,17 +80,9 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function getGaugeColor(percent: number) {
-  if (percent < 35) return "#3bb273";
-  if (percent < 70) return "#f0c419";
-  return "#f25f5c";
-}
-
-function makeIcons(emoji: string, count: number) {
-  return Array.from({ length: count }, (_, i) => (
-    <span key={`${emoji}-${i}`} style={{ fontSize: "20px" }}>
-      {emoji}
-    </span>
-  ));
+  if (percent < 35) return "#41c97b";
+  if (percent < 70) return "#f2c94c";
+  return "#ff7a59";
 }
 
 function useCountUp(target: number, decimals = 0, duration = 700) {
@@ -115,10 +112,18 @@ function useCountUp(target: number, decimals = 0, duration = 700) {
   return display;
 }
 
+function makeIcons(emoji: string, count: number) {
+  return Array.from({ length: count }, (_, i) => (
+    <span key={`${emoji}-${i}`} style={{ fontSize: "20px", lineHeight: 1 }}>
+      {emoji}
+    </span>
+  ));
+}
+
 const styles = {
   page: {
     minHeight: "100vh",
-    background: "linear-gradient(180deg, #0b1f1a 0%, #123b2d 48%, #1f6b49 100%)",
+    background: "linear-gradient(180deg, #0b1f1a 0%, #123b2d 50%, #1f6b49 100%)",
     color: "#f4fff8",
     fontFamily: "sans-serif",
     padding: "12px",
@@ -180,7 +185,7 @@ const styles = {
   } as const,
 };
 
-function App() {
+export default function App() {
   const [page, setPage] = useState<"student" | "admin">("student");
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [name, setName] = useState("");
@@ -321,16 +326,54 @@ function App() {
   const animatedKwh = useCountUp(totalKwh, 2, 700);
   const animatedCo2 = useCountUp(totalCo2, 2, 700);
 
-  const participantPercent = clamp((totalPeople / SCHOOL_TOTAL_STUDENTS) * 100, 0, 100);
-  const powerPercent = clamp((totalKwh / 10) * 100, 0, 100);
-  const carbonPercent = clamp((totalCo2 / 5) * 100, 0, 100);
+  const participantPercent = clamp((totalPeople / EVENT_TARGET_STUDENTS) * 100, 0, 100);
+  const powerPercent = clamp((totalKwh / POWER_TARGET_KWH) * 100, 0, 100);
+  const carbonPercent = clamp((totalCo2 / CO2_TARGET_KG) * 100, 0, 100);
 
   const participantColor = getGaugeColor(participantPercent);
   const powerColor = getGaugeColor(powerPercent);
   const carbonColor = getGaugeColor(carbonPercent);
 
-  const powerIcons = clamp(Math.round(totalKwh * 2), 1, 8);
-  const carbonIcons = clamp(Math.round(totalCo2 * 3), 1, 8);
+  const powerIcons = clamp(Math.round((totalKwh / POWER_TARGET_KWH) * 8), 1, 8);
+  const carbonIcons = clamp(Math.round((totalCo2 / CO2_TARGET_KG) * 8), 1, 8);
+
+  const classSummary = useMemo(() => {
+    const summaryMap = new Map<
+      string,
+      { className: string; people: number; bulbs: number; kwh: number; won: number; co2: number }
+    >();
+
+    for (const item of submissions) {
+      const current = summaryMap.get(item.className) ?? {
+        className: item.className,
+        people: 0,
+        bulbs: 0,
+        kwh: 0,
+        won: 0,
+        co2: 0,
+      };
+
+      current.people += 1;
+      current.bulbs += item.bulbCount;
+      current.kwh += item.savedKwh;
+      current.won += item.savedCostWon;
+      current.co2 += item.savedCo2Kg;
+
+      summaryMap.set(item.className, current);
+    }
+
+    return Array.from(summaryMap.values()).sort((a, b) => {
+      if (b.kwh !== a.kwh) return b.kwh - a.kwh;
+      if (b.people !== a.people) return b.people - a.people;
+      return a.className.localeCompare(b.className, "ko");
+    });
+  }, [submissions]);
+
+  const recentSubmissions = useMemo(() => {
+    return [...submissions]
+      .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime())
+      .slice(0, 20);
+  }, [submissions]);
 
   const currentBulbInfo = bulbConfig[bulbType];
 
@@ -374,12 +417,6 @@ function App() {
     }
     setTitleTapCount(next);
   };
-
-  const recentSubmissions = useMemo(() => {
-    return [...submissions]
-      .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime())
-      .slice(0, 20);
-  }, [submissions]);
 
   const gaugeBar = (percent: number, color: string) => ({
     width: `${percent}%`,
@@ -433,67 +470,50 @@ function App() {
         {page === "student" ? (
           <>
             <div style={styles.card}>
-              <div style={{ color: "#baf3cf", fontSize: "14px", fontWeight: 700 }}>실시간 참여 현황</div>
-              <div style={{ marginTop: "8px", fontSize: "44px", fontWeight: 900, lineHeight: 1, color: "#ffffff" }}>
+              <h2
+                style={{
+                  marginTop: 0,
+                  marginBottom: "12px",
+                  fontSize: "26px",
+                  fontWeight: 900,
+                  color: "#ffffff",
+                }}
+              >
+                실시간 참여 현황
+              </h2>
+
+              <div style={{ fontSize: "48px", fontWeight: 900, lineHeight: 1, color: "#ffffff" }}>
                 {animatedPeople}
               </div>
-              <div style={{ marginTop: "6px", fontSize: "16px", fontWeight: 700 }}>명 참여 중</div>
+              <div style={{ marginTop: "6px", fontSize: "18px", fontWeight: 800, color: "#ffffff" }}>
+                명 참여 중
+              </div>
 
               <div style={{ marginTop: "12px", height: "12px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
                 <div style={gaugeBar(participantPercent, participantColor)} />
               </div>
 
-              <div style={{ marginTop: "8px", color: "#d7f7e2", fontSize: "13px" }}>
-                전체 예상 참여 인원 {SCHOOL_TOTAL_STUDENTS}명 기준 {participantPercent.toFixed(1)}%
+              <div style={{ marginTop: "8px", color: "#d7f7e2", fontSize: "14px", lineHeight: 1.6 }}>
+                <div>목표 300명 기준 {participantPercent.toFixed(1)}%</div>
+                <div>전교생 1000명 중 참여</div>
               </div>
             </div>
 
             <div style={styles.card}>
-              <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "22px" }}>실시간 절감 효과</h2>
-
-              <div style={{ display: "grid", gap: "12px" }}>
-                <div style={styles.statCard}>
-                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>⚡ 누적 절감 전력</div>
-                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{animatedKwh.toFixed(2)} kWh</div>
-                  <div style={{ marginTop: "8px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
-                    {makeIcons("💡", powerIcons)}
-                  </div>
-                  <div style={{ marginTop: "10px", height: "10px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
-                    <div style={gaugeBar(powerPercent, powerColor)} />
-                  </div>
-                </div>
-
-                <div style={styles.statCard}>
-                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>🌿 누적 탄소 감소</div>
-                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{animatedCo2.toFixed(2)} kg CO₂</div>
-                  <div style={{ marginTop: "8px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
-                    {makeIcons("🌳", carbonIcons)}
-                  </div>
-                  <div style={{ marginTop: "10px", height: "10px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
-                    <div style={gaugeBar(carbonPercent, carbonColor)} />
-                  </div>
-                </div>
-
-                <div style={styles.statCard}>
-                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>💰 누적 절약 전기요금</div>
-                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{formatWon(totalWon)}원</div>
-                </div>
-
-                <div style={styles.statCard}>
-                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>💡 누적 전등 수</div>
-                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{totalBulbs}개</div>
-                </div>
-              </div>
-            </div>
-
-            <div style={styles.card}>
-              <h2 style={{ marginTop: 0, marginBottom: "8px", fontSize: "22px" }}>불 끄기 인증</h2>
-              <p style={{ marginTop: 0, color: "#d7f7e2", lineHeight: 1.6, fontSize: "15px" }}>
-                지금 계신 곳에서 10분 동안 불을 끈 뒤 아래 내용을 입력해 주세요.
-              </p>
+              <h2
+                style={{
+                  marginTop: 0,
+                  marginBottom: "12px",
+                  fontSize: "26px",
+                  fontWeight: 900,
+                  color: "#ffffff",
+                }}
+              >
+                불끄기 인증
+              </h2>
 
               <form onSubmit={handleSubmit}>
-                <div style={{ marginTop: "16px" }}>
+                <div style={{ marginTop: "4px" }}>
                   <label style={{ display: "block", marginBottom: "8px", fontWeight: 700, fontSize: "15px" }}>
                     이름
                   </label>
@@ -692,7 +712,52 @@ function App() {
             </div>
 
             <div style={styles.card}>
-              <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "22px" }}>나의 실천 결과</h2>
+              <h2
+                style={{
+                  marginTop: 0,
+                  marginBottom: "12px",
+                  fontSize: "26px",
+                  fontWeight: 900,
+                  color: "#ffffff",
+                }}
+              >
+                실시간 절감 효과
+              </h2>
+
+              <div style={{ display: "grid", gap: "12px" }}>
+                <div style={styles.statCard}>
+                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>⚡ 누적 절감 전력</div>
+                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{animatedKwh.toFixed(2)} kWh</div>
+                  <div style={{ marginTop: "8px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                    {makeIcons("💡", powerIcons)}
+                  </div>
+                  <div style={{ marginTop: "10px", height: "10px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
+                    <div style={gaugeBar(powerPercent, powerColor)} />
+                  </div>
+                </div>
+
+                <div style={styles.statCard}>
+                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>🌿 누적 탄소 감소</div>
+                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{animatedCo2.toFixed(2)} kg CO₂</div>
+                  <div style={{ marginTop: "8px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                    {makeIcons("🌳", carbonIcons)}
+                  </div>
+                  <div style={{ marginTop: "10px", height: "10px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
+                    <div style={gaugeBar(carbonPercent, carbonColor)} />
+                  </div>
+                </div>
+
+                <div style={styles.statCard}>
+                  <div style={{ color: "#baf3cf", fontSize: "13px" }}>💰 누적 절약 전기요금</div>
+                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{formatWon(totalWon)}원</div>
+                </div>
+              </div>
+            </div>
+
+            <div style={styles.card}>
+              <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "24px", fontWeight: 900, color: "#ffffff" }}>
+                나의 결과
+              </h2>
 
               {!latestSubmission ? (
                 <p style={{ color: "#d7f7e2", margin: 0 }}>아직 제출한 내용이 없어요.</p>
@@ -793,6 +858,28 @@ function App() {
                   <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{formatCo2(totalCo2)} kg</div>
                 </div>
               </div>
+            </div>
+
+            <div style={styles.card}>
+              <h3 style={{ marginTop: 0, marginBottom: "12px" }}>학급별 순위</h3>
+              {classSummary.length === 0 ? (
+                <p style={{ color: "#d7f7e2", margin: 0 }}>아직 제출된 데이터가 없습니다.</p>
+              ) : (
+                <div style={{ display: "grid", gap: "10px" }}>
+                  {classSummary.map((item, index) => (
+                    <div key={item.className} style={styles.statCard}>
+                      <div style={{ color: "#baf3cf", fontSize: "13px" }}>{index + 1}위</div>
+                      <div style={{ marginTop: "4px", fontSize: "22px", fontWeight: 900 }}>{item.className}</div>
+                      <div style={{ marginTop: "8px", color: "#dbffea", lineHeight: 1.7, fontSize: "14px" }}>
+                        <div>👥 참여 인원: {item.people}명</div>
+                        <div>💡 전등 수: {item.bulbs}개</div>
+                        <div>⚡ 절감 전력: {formatKwh(item.kwh)} kWh</div>
+                        <div>💰 절약 요금: {formatWon(item.won)}원</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div style={styles.card}>
@@ -907,5 +994,3 @@ function App() {
     </div>
   );
 }
-
-export default App;
