@@ -494,8 +494,9 @@ export default function App() {
               </div>
 
               <div style={{ marginTop: "8px", color: "#d7f7e2", fontSize: "14px", lineHeight: 1.6 }}>
-                <div>목표 300명 기준 {participantPercent.toFixed(1)}%</div>
-                <div>전교생 1000명 중 참여</div>
+              <div>목표 {EVENT_TARGET_STUDENTS}명 기준 {participantPercent.toFixed(1)}%</div>
+             <div>전교생 {SCHOOL_TOTAL_STUDENTS}명 중 참여</div>
+</div>
               </div>
             </div>
 
