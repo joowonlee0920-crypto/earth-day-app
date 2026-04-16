@@ -30,11 +30,7 @@ const DURATION_MINUTES = 10;
 const COST_PER_KWH = 200;
 const CO2_PER_KWH = 0.424;
 const MAX_BULB_COUNT = 20;
-
 const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD ?? "";
-
-const SCHOOL_TOTAL_STUDENTS = 1000;
-const EVENT_TARGET_STUDENTS = 300;
 const POWER_TARGET_KWH = 2.5;
 const CO2_TARGET_KG = 1.0;
 
