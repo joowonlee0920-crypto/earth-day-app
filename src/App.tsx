@@ -1,12 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { db } from "./firebase";
-import { addDoc, collection, onSnapshot, orderBy, query } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  orderBy,
+  query,
+  setDoc,
+} from "firebase/firestore";
 
 type BulbType = "LED" | "FLUORESCENT" | "UNKNOWN";
 
 type Submission = {
   id: string;
   name: string;
+  studentId: string;
   className: string;
   bulbCount: number;
   bulbType: BulbType;
@@ -21,18 +30,55 @@ type Submission = {
 const DURATION_MINUTES = 10;
 const COST_PER_KWH = 200;
 const CO2_PER_KWH = 0.424;
+const MAX_BULB_COUNT = 20;
 
-const ADMIN_PASSWORD = "earth2026";
+const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD ?? "";
 
 const SCHOOL_TOTAL_STUDENTS = 1000;
 const EVENT_TARGET_STUDENTS = 300;
 const POWER_TARGET_KWH = 2.5;
 const CO2_TARGET_KG = 1.0;
 
+const EVENT_START_HOUR = 20;
+const EVENT_START_MINUTE = 0;
+const EVENT_END_HOUR = 20;
+const EVENT_END_MINUTE = 10;
+
 const CLASS_OPTIONS = [
-  "1-1", "1-2", "1-3", "1-4", "1-5", "1-6", "1-7", "1-8", "1-9", "1-10", "1-11", "1-12",
-  "2-1", "2-2", "2-3", "2-4", "2-5", "2-6", "2-7", "2-8", "2-9", "2-10", "2-11",
-  "3-1", "3-2", "3-3", "3-4", "3-5", "3-6", "3-7", "3-8", "3-9", "3-10", "3-11",
+  "1-1",
+  "1-2",
+  "1-3",
+  "1-4",
+  "1-5",
+  "1-6",
+  "1-7",
+  "1-8",
+  "1-9",
+  "1-10",
+  "1-11",
+  "1-12",
+  "2-1",
+  "2-2",
+  "2-3",
+  "2-4",
+  "2-5",
+  "2-6",
+  "2-7",
+  "2-8",
+  "2-9",
+  "2-10",
+  "2-11",
+  "3-1",
+  "3-2",
+  "3-3",
+  "3-4",
+  "3-5",
+  "3-6",
+  "3-7",
+  "3-8",
+  "3-9",
+  "3-10",
+  "3-11",
 ] as const;
 
 const bulbConfig: Record<BulbType, { label: string; watt: number; emoji: string }> = {
@@ -40,6 +86,8 @@ const bulbConfig: Record<BulbType, { label: string; watt: number; emoji: string 
   FLUORESCENT: { label: "형광등", watt: 20, emoji: "🔆" },
   UNKNOWN: { label: "모르겠음", watt: 15, emoji: "❓" },
 };
+
+const LAST_SUBMISSION_STORAGE_KEY = "earth-day-last-submission";
 
 function calculateResult(bulbCount: number, bulbType: BulbType) {
   const wattPerBulb = bulbConfig[bulbType].watt;
@@ -73,6 +121,10 @@ function formatCo2(value: number) {
 
 function normalizeName(value: string) {
   return value.trim().replace(/\s+/g, "");
+}
+
+function normalizeStudentId(value: string) {
+  return value.replace(/[^0-9]/g, "").slice(0, 5);
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -118,6 +170,61 @@ function makeIcons(emoji: string, count: number) {
       {emoji}
     </span>
   ));
+}
+
+function getSubmissionDocId(className: string, studentId: string) {
+  return `${className}-${studentId}`;
+}
+
+function isEventOpen(now: Date) {
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const startMinutes = EVENT_START_HOUR * 60 + EVENT_START_MINUTE;
+  const endMinutes = EVENT_END_HOUR * 60 + EVENT_END_MINUTE;
+  return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+}
+
+function getMaskedName(name: string) {
+  if (name.length <= 1) return name;
+  if (name.length === 2) return `${name[0]}*`;
+  return `${name[0]}*${name[name.length - 1]}`;
+}
+
+function downloadCsv(submissions: Submission[]) {
+  const header = [
+    "이름",
+    "학번",
+    "학급",
+    "전등 수",
+    "전등 종류",
+    "절감 전력(kWh)",
+    "절약 전기요금(원)",
+    "탄소 저감(kg)",
+    "제출 시각",
+  ];
+
+  const rows = submissions.map((item) => [
+    item.name,
+    item.studentId,
+    item.className,
+    item.bulbCount,
+    bulbConfig[item.bulbType].label,
+    item.savedKwh.toFixed(3),
+    Math.round(item.savedCostWon),
+    item.savedCo2Kg.toFixed(3),
+    item.submittedAt,
+  ]);
+
+  const csv = [header, ...rows]
+    .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+    .join("\n");
+
+  const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "earth-day-submissions.csv";
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 const styles = {
@@ -189,6 +296,7 @@ export default function App() {
   const [page, setPage] = useState<"student" | "admin">("student");
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [name, setName] = useState("");
+  const [studentId, setStudentId] = useState("");
   const [className, setClassName] = useState("");
   const [bulbCount, setBulbCount] = useState(1);
   const [bulbType, setBulbType] = useState<BulbType>("LED");
@@ -196,6 +304,7 @@ export default function App() {
   const [successMessage, setSuccessMessage] = useState("");
   const [duplicateWarning, setDuplicateWarning] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [mySubmission, setMySubmission] = useState<Submission | null>(null);
 
   const [isAdminUnlocked, setIsAdminUnlocked] = useState(false);
   const [showAdminModal, setShowAdminModal] = useState(false);
@@ -204,22 +313,33 @@ export default function App() {
   const [titleTapCount, setTitleTapCount] = useState(0);
 
   const [now, setNow] = useState(new Date());
+  const resultCardRef = useRef<HTMLDivElement | null>(null);
 
   const preview = useMemo(() => calculateResult(bulbCount, bulbType), [bulbCount, bulbType]);
-  const latestSubmission = submissions[submissions.length - 1] ?? null;
 
   useEffect(() => {
     const q = query(collection(db, "submissions"), orderBy("submittedAt", "asc"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const items = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
+      const items = snapshot.docs.map((docItem) => ({
+        id: docItem.id,
+        ...docItem.data(),
       })) as Submission[];
 
       setSubmissions(items);
     });
 
     return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const saved = localStorage.getItem(LAST_SUBMISSION_STORAGE_KEY);
+    if (saved) {
+      try {
+        setMySubmission(JSON.parse(saved));
+      } catch {
+        localStorage.removeItem(LAST_SUBMISSION_STORAGE_KEY);
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -230,32 +350,39 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  const hasDuplicateSubmission = (studentName: string, selectedClass: string) => {
-    const normalizedTarget = normalizeName(studentName);
+  const hasDuplicateSubmission = (selectedClass: string, selectedStudentId: string) => {
     return submissions.some(
-      (item) =>
-        normalizeName(item.name) === normalizedTarget &&
-        item.className === selectedClass
+      (item) => item.className === selectedClass && item.studentId === selectedStudentId,
     );
   };
 
   useEffect(() => {
-    if (!name.trim() || !className) {
+    if (!studentId || !className) {
       setDuplicateWarning("");
       return;
     }
 
-    if (hasDuplicateSubmission(name, className)) {
-      setDuplicateWarning("같은 이름과 학급으로 이미 제출된 기록이 있어요. 다시 확인해 주세요.");
+    if (hasDuplicateSubmission(className, studentId)) {
+      setDuplicateWarning("같은 학급과 학번으로 이미 제출된 기록이 있어요. 다시 확인해 주세요.");
     } else {
       setDuplicateWarning("");
     }
-  }, [name, className, submissions]);
+  }, [studentId, className, submissions]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!name.trim()) {
+    const normalizedName = normalizeName(name);
+    const normalizedId = normalizeStudentId(studentId);
+    const isLive = isEventOpen(now);
+
+    if (!isLive) {
+      setError("지금은 제출 시간이 아닙니다. 행사 시간(20:00~20:10)에만 제출할 수 있어요.");
+      setSuccessMessage("");
+      return;
+    }
+
+    if (!normalizedName) {
       setError("이름을 입력해 주세요.");
       setSuccessMessage("");
       return;
@@ -267,14 +394,20 @@ export default function App() {
       return;
     }
 
-    if (bulbCount < 1) {
-      setError("전등 개수는 1개 이상이어야 해요.");
+    if (normalizedId.length < 4) {
+      setError("학번을 입력해 주세요. 예: 1101");
       setSuccessMessage("");
       return;
     }
 
-    if (hasDuplicateSubmission(name, className)) {
-      setError("중복 제출이 의심됩니다. 같은 이름과 학급으로 이미 제출된 기록이 있어요.");
+    if (bulbCount < 1 || bulbCount > MAX_BULB_COUNT) {
+      setError(`전등 개수는 1개 이상 ${MAX_BULB_COUNT}개 이하로 입력해 주세요.`);
+      setSuccessMessage("");
+      return;
+    }
+
+    if (hasDuplicateSubmission(className, normalizedId)) {
+      setError("중복 제출이 의심됩니다. 같은 학급과 학번으로 이미 제출된 기록이 있어요.");
       setSuccessMessage("");
       return;
     }
@@ -285,9 +418,17 @@ export default function App() {
 
     try {
       const result = calculateResult(bulbCount, bulbType);
+      const docId = getSubmissionDocId(className, normalizedId);
+      const docRef = doc(db, "submissions", docId);
+      const existing = await getDoc(docRef);
 
-      const submission = {
-        name: name.trim(),
+      if (existing.exists()) {
+        throw new Error("duplicate-submission");
+      }
+
+      const submissionData = {
+        name: normalizedName,
+        studentId: normalizedId,
         className,
         bulbCount,
         bulbType,
@@ -299,17 +440,34 @@ export default function App() {
         submittedAt: new Date().toISOString(),
       };
 
-      await addDoc(collection(db, "submissions"), submission);
+      await setDoc(docRef, submissionData);
 
-      setSuccessMessage("인증이 완료되었어요.");
+      const savedSubmission: Submission = {
+        id: docId,
+        ...submissionData,
+      };
+
+      setMySubmission(savedSubmission);
+      localStorage.setItem(LAST_SUBMISSION_STORAGE_KEY, JSON.stringify(savedSubmission));
+
+      setSuccessMessage("인증이 완료되었어요. 나의 결과 카드에서 확인해 보세요.");
       setName("");
+      setStudentId("");
       setClassName("");
       setBulbCount(1);
       setBulbType("LED");
       setDuplicateWarning("");
+
+      setTimeout(() => {
+        resultCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 150);
     } catch (err) {
       console.error("제출 저장 실패:", err);
-      setError("제출 중 오류가 발생했어요. 다시 시도해 주세요.");
+      if (err instanceof Error && err.message === "duplicate-submission") {
+        setError("이미 같은 학급과 학번으로 제출된 기록이 있어요.");
+      } else {
+        setError("제출 중 오류가 발생했어요. 다시 시도해 주세요.");
+      }
       setSuccessMessage("");
     } finally {
       setIsSubmitting(false);
@@ -376,15 +534,22 @@ export default function App() {
   }, [submissions]);
 
   const currentBulbInfo = bulbConfig[bulbType];
-
-  const isEventLive =
-    now.getHours() === 20 && now.getMinutes() >= 0 && now.getMinutes() < 10;
+  const isEventLive = isEventOpen(now);
+  const canSubmit = isEventLive && !isSubmitting;
 
   const openAdminPage = () => {
+    if (!ADMIN_PASSWORD) {
+      setAdminPasswordInput("");
+      setAdminPasswordError("관리자 비밀번호가 설정되지 않았습니다. .env 파일을 확인해 주세요.");
+      setShowAdminModal(true);
+      return;
+    }
+
     if (isAdminUnlocked) {
       setPage("admin");
       return;
     }
+
     setAdminPasswordInput("");
     setAdminPasswordError("");
     setShowAdminModal(true);
@@ -416,6 +581,21 @@ export default function App() {
       return;
     }
     setTitleTapCount(next);
+  };
+
+  const handleCopyShareText = async () => {
+    if (!mySubmission) return;
+
+    const text = `나는 지구의 날 소등 행사에서 전등 ${mySubmission.bulbCount}개를 끄고 약 ${formatKwh(
+      mySubmission.savedKwh,
+    )}kWh의 전력을 절약했어요. 탄소는 약 ${formatCo2(mySubmission.savedCo2Kg)}kg 줄였어요!`;
+
+    try {
+      await navigator.clipboard.writeText(text);
+      alert("공유 문구가 복사되었어요.");
+    } catch {
+      alert("복사에 실패했어요. 다시 시도해 주세요.");
+    }
   };
 
   const gaugeBar = (percent: number, color: string) => ({
@@ -450,7 +630,7 @@ export default function App() {
             10분 동안 불을 끄고, 우리 학교의 실천을 함께 기록해요.
           </p>
 
-          {isEventLive && (
+          {isEventLive ? (
             <div
               style={{
                 marginTop: "14px",
@@ -463,6 +643,20 @@ export default function App() {
               }}
             >
               🔴 지금 진행 중입니다 (20:00~20:10)
+            </div>
+          ) : (
+            <div
+              style={{
+                marginTop: "14px",
+                background: "rgba(255,255,255,0.12)",
+                border: "1px solid rgba(255,255,255,0.16)",
+                borderRadius: "16px",
+                padding: "10px 12px",
+                fontWeight: 700,
+                fontSize: "14px",
+              }}
+            >
+              ⏰ 제출은 행사 시간(20:00~20:10)에만 가능해요.
             </div>
           )}
         </div>
@@ -489,15 +683,23 @@ export default function App() {
                 명 참여 중
               </div>
 
-              <div style={{ marginTop: "12px", height: "12px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
+              <div
+                style={{
+                  marginTop: "12px",
+                  height: "12px",
+                  borderRadius: "999px",
+                  background: "#28473a",
+                  overflow: "hidden",
+                }}
+              >
                 <div style={gaugeBar(participantPercent, participantColor)} />
               </div>
 
               <div style={{ marginTop: "8px", color: "#d7f7e2", fontSize: "14px", lineHeight: 1.6 }}>
-              <div>목표 {EVENT_TARGET_STUDENTS}명 기준 {participantPercent.toFixed(1)}%</div>
-             <div>전교생 {SCHOOL_TOTAL_STUDENTS}명 중 참여</div>
-</div>
+                <div>목표 {EVENT_TARGET_STUDENTS}명 기준 {participantPercent.toFixed(1)}%</div>
+                <div>전교생 {SCHOOL_TOTAL_STUDENTS}명 중 참여</div>
               </div>
+            </div>
 
             <div style={styles.card}>
               <h2
@@ -528,6 +730,20 @@ export default function App() {
 
                 <div style={{ marginTop: "16px" }}>
                   <label style={{ display: "block", marginBottom: "8px", fontWeight: 700, fontSize: "15px" }}>
+                    학번
+                  </label>
+                  <input
+                    value={studentId}
+                    onChange={(e) => setStudentId(normalizeStudentId(e.target.value))}
+                    disabled={isSubmitting}
+                    style={styles.input}
+                    placeholder="예: 1101"
+                    inputMode="numeric"
+                  />
+                </div>
+
+                <div style={{ marginTop: "16px" }}>
+                  <label style={{ display: "block", marginBottom: "8px", fontWeight: 700, fontSize: "15px" }}>
                     학급 선택
                   </label>
                   <select
@@ -553,7 +769,7 @@ export default function App() {
                     <button
                       type="button"
                       disabled={isSubmitting}
-                      onClick={() => setBulbCount((prev) => Math.max(1, prev - 1))}
+                      onClick={() => setBulbCount((prev) => clamp(prev - 1, 1, MAX_BULB_COUNT))}
                       style={{
                         ...styles.smallButton,
                         width: "48px",
@@ -568,20 +784,21 @@ export default function App() {
                     <input
                       type="number"
                       min={1}
+                      max={MAX_BULB_COUNT}
                       value={bulbCount}
                       disabled={isSubmitting}
-                      onChange={(e) => setBulbCount(Math.max(1, Number(e.target.value) || 1))}
+                      onChange={(e) => setBulbCount(clamp(Number(e.target.value) || 1, 1, MAX_BULB_COUNT))}
                       style={{
                         ...styles.input,
                         width: "110px",
-                        textAlign: "center" as const,
+                        textAlign: "center",
                         padding: "12px",
                       }}
                     />
                     <button
                       type="button"
                       disabled={isSubmitting}
-                      onClick={() => setBulbCount((prev) => prev + 1)}
+                      onClick={() => setBulbCount((prev) => clamp(prev + 1, 1, MAX_BULB_COUNT))}
                       style={{
                         ...styles.smallButton,
                         width: "48px",
@@ -593,6 +810,9 @@ export default function App() {
                     >
                       +
                     </button>
+                  </div>
+                  <div style={{ marginTop: "8px", fontSize: "13px", color: "#b8f5ca" }}>
+                    1개 이상 {MAX_BULB_COUNT}개 이하로 입력해 주세요.
                   </div>
                 </div>
 
@@ -612,7 +832,7 @@ export default function App() {
                           style={{
                             ...styles.smallButton,
                             width: "100%",
-                            textAlign: "left" as const,
+                            textAlign: "left",
                             background: active ? "#214d3c" : "#16362b",
                             color: "#ffffff",
                             border: active ? "2px solid #7ef0a8" : "1px solid #3d7258",
@@ -644,6 +864,22 @@ export default function App() {
                       선택한 전등 종류: {currentBulbInfo.emoji} {currentBulbInfo.label} ({currentBulbInfo.watt}W 기준)
                     </div>
                   </div>
+                </div>
+
+                <div
+                  style={{
+                    marginTop: "12px",
+                    background: "rgba(126,240,168,0.08)",
+                    color: "#d7f7e2",
+                    padding: "12px",
+                    borderRadius: "14px",
+                    fontSize: "13px",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  ※ LED 10W, 형광등 20W, 모름 15W 기준
+                  <br />
+                  ※ 전기요금 200원/kWh, 탄소배출계수 0.424kg/kWh 기준
                 </div>
 
                 {duplicateWarning && (
@@ -696,17 +932,17 @@ export default function App() {
 
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={!canSubmit}
                   style={{
                     ...styles.button,
                     marginTop: "18px",
                     background: "linear-gradient(90deg, #1ea95f 0%, #41d67a 100%)",
                     color: "#08311f",
-                    opacity: isSubmitting ? 0.7 : 1,
-                    cursor: isSubmitting ? "not-allowed" : "pointer",
+                    opacity: canSubmit ? 1 : 0.65,
+                    cursor: canSubmit ? "pointer" : "not-allowed",
                   }}
                 >
-                  {isSubmitting ? "제출 중..." : "인증 제출하기"}
+                  {isSubmitting ? "제출 중..." : isEventLive ? "인증 제출하기" : "행사 시간에 제출 가능"}
                 </button>
               </form>
             </div>
@@ -727,22 +963,42 @@ export default function App() {
               <div style={{ display: "grid", gap: "12px" }}>
                 <div style={styles.statCard}>
                   <div style={{ color: "#baf3cf", fontSize: "13px" }}>⚡ 누적 절감 전력</div>
-                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{animatedKwh.toFixed(2)} kWh</div>
+                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>
+                    {animatedKwh.toFixed(2)} kWh
+                  </div>
                   <div style={{ marginTop: "8px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
                     {makeIcons("💡", powerIcons)}
                   </div>
-                  <div style={{ marginTop: "10px", height: "10px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
+                  <div
+                    style={{
+                      marginTop: "10px",
+                      height: "10px",
+                      borderRadius: "999px",
+                      background: "#28473a",
+                      overflow: "hidden",
+                    }}
+                  >
                     <div style={gaugeBar(powerPercent, powerColor)} />
                   </div>
                 </div>
 
                 <div style={styles.statCard}>
                   <div style={{ color: "#baf3cf", fontSize: "13px" }}>🌿 누적 탄소 감소</div>
-                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>{animatedCo2.toFixed(2)} kg CO₂</div>
+                  <div style={{ marginTop: "6px", fontSize: "28px", fontWeight: 900 }}>
+                    {animatedCo2.toFixed(2)} kg CO₂
+                  </div>
                   <div style={{ marginTop: "8px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
                     {makeIcons("🌳", carbonIcons)}
                   </div>
-                  <div style={{ marginTop: "10px", height: "10px", borderRadius: "999px", background: "#28473a", overflow: "hidden" }}>
+                  <div
+                    style={{
+                      marginTop: "10px",
+                      height: "10px",
+                      borderRadius: "999px",
+                      background: "#28473a",
+                      overflow: "hidden",
+                    }}
+                  >
                     <div style={gaugeBar(carbonPercent, carbonColor)} />
                   </div>
                 </div>
@@ -754,13 +1010,13 @@ export default function App() {
               </div>
             </div>
 
-            <div style={styles.card}>
+            <div style={styles.card} ref={resultCardRef}>
               <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "24px", fontWeight: 900, color: "#ffffff" }}>
                 나의 결과
               </h2>
 
-              {!latestSubmission ? (
-                <p style={{ color: "#d7f7e2", margin: 0 }}>아직 제출한 내용이 없어요.</p>
+              {!mySubmission ? (
+                <p style={{ color: "#d7f7e2", margin: 0 }}>아직 이 기기에서 제출한 내용이 없어요.</p>
               ) : (
                 <>
                   <div
@@ -773,39 +1029,57 @@ export default function App() {
                   >
                     <div style={{ fontSize: "13px", color: "#baf3cf" }}>참여 정보</div>
                     <div style={{ fontSize: "22px", fontWeight: 900, marginTop: "6px" }}>
-                      {latestSubmission.name} · {latestSubmission.className}
+                      {mySubmission.name} · {mySubmission.className}
                     </div>
                     <div style={{ marginTop: "8px", color: "#dbffea", fontSize: "15px", lineHeight: 1.5 }}>
-                      {bulbConfig[latestSubmission.bulbType].emoji} 전등 {latestSubmission.bulbCount}개를 10분 동안 끔
+                      {bulbConfig[mySubmission.bulbType].emoji} 전등 {mySubmission.bulbCount}개를 {DURATION_MINUTES}분 동안 끔
                     </div>
                   </div>
 
                   <div style={{ display: "grid", gap: "10px" }}>
                     <div style={styles.statCard}>
                       <div style={{ color: "#baf3cf", fontSize: "13px" }}>⚡ 절감 전력량</div>
-                      <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>{formatKwh(latestSubmission.savedKwh)}</div>
+                      <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>
+                        {formatKwh(mySubmission.savedKwh)}
+                      </div>
                       <div style={{ color: "#dbffea" }}>kWh</div>
                     </div>
 
                     <div style={styles.statCard}>
                       <div style={{ color: "#baf3cf", fontSize: "13px" }}>💰 절약 전기요금</div>
-                      <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>{formatWon(latestSubmission.savedCostWon)}</div>
+                      <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>
+                        {formatWon(mySubmission.savedCostWon)}
+                      </div>
                       <div style={{ color: "#dbffea" }}>원</div>
                     </div>
 
                     <div style={styles.statCard}>
                       <div style={{ color: "#baf3cf", fontSize: "13px" }}>🌿 탄소 저감량</div>
-                      <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>{formatCo2(latestSubmission.savedCo2Kg)}</div>
+                      <div style={{ marginTop: "6px", fontSize: "30px", fontWeight: 900 }}>
+                        {formatCo2(mySubmission.savedCo2Kg)}
+                      </div>
                       <div style={{ color: "#dbffea" }}>kg CO₂</div>
                     </div>
 
                     <div style={styles.statCard}>
                       <div style={{ color: "#baf3cf", fontSize: "13px" }}>🕒 제출 시각</div>
                       <div style={{ marginTop: "6px", fontSize: "16px", fontWeight: 700, lineHeight: 1.5 }}>
-                        {formatDateTime(latestSubmission.submittedAt)}
+                        {formatDateTime(mySubmission.submittedAt)}
                       </div>
                     </div>
                   </div>
+
+                  <button
+                    onClick={handleCopyShareText}
+                    style={{
+                      ...styles.button,
+                      marginTop: "14px",
+                      background: "#275743",
+                      color: "#ffffff",
+                    }}
+                  >
+                    결과 문구 복사하기
+                  </button>
                 </>
               )}
             </div>
@@ -835,7 +1109,28 @@ export default function App() {
             </div>
 
             <div style={styles.card}>
-              <h3 style={{ marginTop: 0, marginBottom: "12px" }}>전체 통계</h3>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: "10px",
+                  marginBottom: "12px",
+                }}
+              >
+                <h3 style={{ margin: 0 }}>전체 통계</h3>
+                <button
+                  onClick={() => downloadCsv(submissions)}
+                  style={{
+                    ...styles.smallButton,
+                    background: "linear-gradient(90deg, #1ea95f 0%, #41d67a 100%)",
+                    color: "#08311f",
+                  }}
+                >
+                  CSV 다운로드
+                </button>
+              </div>
+
               <div style={{ display: "grid", gap: "10px" }}>
                 <div style={styles.statCard}>
                   <div style={{ color: "#baf3cf", fontSize: "13px" }}>총 참여 인원</div>
@@ -875,6 +1170,7 @@ export default function App() {
                         <div>💡 전등 수: {item.bulbs}개</div>
                         <div>⚡ 절감 전력: {formatKwh(item.kwh)} kWh</div>
                         <div>💰 절약 요금: {formatWon(item.won)}원</div>
+                        <div>🌿 탄소 저감: {formatCo2(item.co2)} kg</div>
                       </div>
                     </div>
                   ))}
@@ -884,15 +1180,19 @@ export default function App() {
 
             <div style={styles.card}>
               <h3 style={{ marginTop: 0, marginBottom: "12px" }}>최근 제출 20건</h3>
+              <p style={{ marginTop: 0, color: "#b8f5ca", fontSize: "13px", lineHeight: 1.6 }}>
+                공개 화면 노출을 고려해 이름은 일부만 표시합니다.
+              </p>
               {recentSubmissions.length === 0 ? (
                 <p style={{ color: "#d7f7e2", margin: 0 }}>아직 제출된 데이터가 없습니다.</p>
               ) : (
                 <div style={{ display: "grid", gap: "10px" }}>
                   {recentSubmissions.map((item) => (
                     <div key={item.id} style={styles.statCard}>
-                      <div style={{ fontSize: "18px", fontWeight: 800 }}>{item.name}</div>
+                      <div style={{ fontSize: "18px", fontWeight: 800 }}>{getMaskedName(item.name)}</div>
                       <div style={{ marginTop: "6px", color: "#dbffea", fontSize: "14px", lineHeight: 1.7 }}>
                         <div>학급: {item.className}</div>
+                        <div>학번: {item.studentId}</div>
                         <div>전등 수: {item.bulbCount}개</div>
                         <div>제출 시각: {formatDateTime(item.submittedAt)}</div>
                       </div>
