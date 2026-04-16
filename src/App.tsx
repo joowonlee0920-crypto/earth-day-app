@@ -1171,7 +1171,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<StudentPage />} />
-      <Route path="/admin-secret-2026" element={<AdminPage />} />
+      <Route path="/admin-asdfqwer" element={<AdminPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
